@@ -34,7 +34,7 @@ https://www.speedrun.com/whg1/resources/mq46b
 
 ## 요구 사항
 
-- Python **3.10 이상**
+- Python 3.10 이상 (3.11 권장)
 - Windows / Linux / macOS
 - GPU는 선택 사항
   - CUDA 환경이 있으면 PyTorch가 GPU를 사용할 수 있습니다.
@@ -58,14 +58,14 @@ cd WorldsHardestGameRL
 ### Windows PowerShell
 
 ```powershell
-python -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
 ### Linux / macOS
 
 ```bash
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 ```
 
