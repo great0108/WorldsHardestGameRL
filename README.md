@@ -6,7 +6,7 @@ The World's Hardest Game의 원본 SWF 파일은 아래 Speedrun.com 리소스 �
 
 https://www.speedrun.com/whg1/resources/mq46b
 
----
+
 
 ## 프로젝트 구조
 
@@ -31,7 +31,6 @@ https://www.speedrun.com/whg1/resources/mq46b
         └── WHGOriginal.swf
 ```
 
----
 
 ## 요구 사항
 
@@ -41,7 +40,7 @@ https://www.speedrun.com/whg1/resources/mq46b
   - CUDA 환경이 있으면 PyTorch가 GPU를 사용할 수 있습니다.
   - CPU만으로도 실행할 수 있습니다.
 
----
+
 
 # 설치
 
@@ -52,7 +51,7 @@ git clone https://github.com/great0108/WorldsHardestGameRL.git
 cd WorldsHardestGameRL
 ```
 
----
+
 
 ## 2. 가상환경 만들기
 
@@ -70,7 +69,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
----
+
 
 ## 3. 패키지 설치
 
@@ -133,8 +132,6 @@ pip uninstall torch torchvision torchaudio -y
 ```
 
 
----
-
 # 먼저 게임이 정상적으로 실행되는지 확인하기
 
 머신러닝 학습 전에 reconstructed environment가 정상적으로 동작하는지 확인하는 것이 좋습니다.
@@ -161,7 +158,7 @@ python play.py
 | `]` | 다음 레벨 |
 | `Esc` | 종료 |
 
----
+
 
 # PPO 학습
 
@@ -228,7 +225,7 @@ PPO는 학습 후반에 성능이 다시 떨어질 수도 있으므로, 항상 `
 
 TensorBoard log가 저장됩니다.
 
----
+
 
 # TensorBoard 확인
 
@@ -255,7 +252,7 @@ train/explained_variance
 
 환경 쪽 success/progress metric도 함께 확인할 수 있습니다.
 
----
+
 
 # 학습 이어서 하기
 
@@ -267,7 +264,7 @@ python train.py \
   --out runs/level01
 ```
 
----
+
 
 # 모델 평가
 
@@ -287,7 +284,7 @@ python evaluate.py runs/level01/best_model.zip --level 1
 - Mean Flash frames
 - Mean randomized start delay
 
----
+
 
 # 학습된 모델 화면으로 보기
 
@@ -301,7 +298,7 @@ python watch.py runs/level01/best_model.zip --level 1
 
 종료하려면 `Esc`를 누르거나 창을 닫으면 됩니다.
 
----
+
 
 # 전체 CLI 확인
 
@@ -313,5 +310,3 @@ python evaluate.py --help
 python watch.py --help
 python play.py --help
 ```
-
----
