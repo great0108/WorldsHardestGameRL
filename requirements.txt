@@ -1,0 +1,10 @@
+gymnasium>=0.29
+numpy>=1.24
+Pillow>=10
+pygame>=2.5
+stable-baselines3>=2.3
+torch>=2.1
+tensorboard>=2.14
+rich>=13.0
+tqdm
+rich
