@@ -71,7 +71,7 @@ def _hold_terminal(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Watch a PPO agent in the exact training environment.")
     ap.add_argument("model", help="path to PPO .zip model")
-    ap.add_argument("--level", type=int, default=3, choices=range(1, 31))
+    ap.add_argument("--level", type=int, default=1, choices=range(1, 31))
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--max-steps", type=int, default=500)
     ap.add_argument("--frame-stack", type=int, default=3)
@@ -153,7 +153,7 @@ def main() -> None:
             obs, reset_info = env.reset()
             decisions = 0
             ep_return = 0.0
-            delay = int(reset_info.get("start_delay_frames", 0))
+            delay = int(env._start_delay_frames)
             print(f"episode {completed + 1}: start delay={delay} frames ({delay / 30:.3f}s)")
 
             _blit_frame(screen, base_env.render())

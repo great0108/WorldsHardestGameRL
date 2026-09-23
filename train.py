@@ -1442,7 +1442,7 @@ def main():
                 features_extractor_class=WHGCNN,
                 features_extractor_kwargs=dict(
                     features_dim=2048,
-                    channels=(64, 128, 128),
+                    channels=(128, 256, 256),
                 ),
                 share_features_extractor=False,
 
