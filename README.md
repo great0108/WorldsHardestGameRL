@@ -132,9 +132,9 @@ pip uninstall torch torchvision torchaudio -y
 ```
 
 
-# 먼저 게임이 정상적으로 실행되는지 확인하기
+# 게임 환경
 
-머신러닝 학습 전에 reconstructed environment가 정상적으로 동작하는지 확인하는 것이 좋습니다.
+학습 전에 환경이 정상적으로 동작하는지 확인하는 것이 좋습니다.
 
 Level 1을 직접 플레이하려면:
 

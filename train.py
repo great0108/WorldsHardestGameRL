@@ -1279,8 +1279,6 @@ def main():
         ),
     )
 
-    # Keep 3 by default so existing 9-channel models can be resumed.
-    # For a fresh model, --frame-stack 4 is worth testing.
     ap.add_argument("--frame-stack", type=int, default=3)
     ap.add_argument(
         "--frame-skip",
@@ -1356,7 +1354,7 @@ def main():
         "--eval-episodes", type=int, default=10,
         help="deterministic eval episodes across randomized start phases",
     )
-    ap.add_argument("--out", default="runs/whg_pixels_l3")
+    ap.add_argument("--out", default="runs/level03")
     ap.add_argument(
         "--resume", default=None,
         help="saved PPO .zip; keep width/height/frame-stack identical",
