@@ -1459,7 +1459,7 @@ def main():
             tensorboard_log=str(out / "tb"),
         )
 
-    checkpoint_every = max(1, 500_000 // args.n_envs)
+    checkpoint_every = max(1, 1_000_000 // args.n_envs)
     callback_items = [
         WHGMetricsCallback(),
         CheckpointCallback(

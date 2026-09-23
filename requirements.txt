@@ -6,5 +6,5 @@ stable-baselines3>=2.3
 torch>=2.1
 tensorboard>=2.14
 rich>=13.0
-tqdm
-rich
+tqdm>=4.66
+rich>=13.0

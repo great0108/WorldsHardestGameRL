@@ -101,10 +101,75 @@ source .venv/bin/activate
 
 ## 3. 패키지 설치
 
+먼저 `pip`을 업데이트합니다.
+
 ```bash
 python -m pip install --upgrade pip
+```
+
+### CPU로 사용할 경우
+
+그대로 프로젝트 의존성을 설치하면 됩니다.
+
+```bash
 pip install -r requirements.txt
 ```
+
+### NVIDIA GPU로 학습할 경우
+
+CUDA를 사용할 예정이라면 **프로젝트 의존성을 설치하기 전에 CUDA 지원 PyTorch를 먼저 설치하는 것을 권장합니다.**
+
+PyTorch 공식 설치 페이지에서 자신의 OS와 GPU 환경에 맞게 다음 항목을 선택합니다.
+
+- OS: Windows 또는 Linux
+- Package: Pip
+- Language: Python
+- Compute Platform: 지원되는 CUDA 버전
+
+공식 설치 페이지:
+
+<https://pytorch.org/get-started/locally/>
+
+페이지에 표시되는 명령을 실행한 뒤 나머지 프로젝트 의존성을 설치합니다. 예시는 다음과 같은 형태입니다. **CUDA 버전 번호는 고정하지 말고 공식 페이지에 현재 표시되는 명령을 사용하는 것이 좋습니다.**
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cuXXX
+pip install -r requirements.txt
+```
+
+설치 후 PyTorch가 GPU를 인식하는지 확인합니다.
+
+```bash
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('PyTorch CUDA:', torch.version.cuda); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+```
+
+정상적인 예시는 다음과 같습니다.
+
+```text
+CUDA available: True
+PyTorch CUDA: 12.x
+GPU: NVIDIA ...
+```
+
+`CUDA available: False`가 나온다면 CPU 전용 PyTorch가 설치되었거나 NVIDIA 드라이버/CUDA 호환 문제가 있는 것입니다. 이 경우 PyTorch 공식 설치 페이지에서 CUDA 빌드 설치 명령을 다시 확인하세요.
+
+이미 CPU 버전의 PyTorch가 설치된 상태라면 제거한 뒤 CUDA 빌드를 다시 설치할 수 있습니다.
+
+```bash
+pip uninstall torch torchvision torchaudio -y
+```
+
+그 다음 공식 PyTorch 설치 페이지에서 제공되는 CUDA용 명령을 실행합니다.
+
+> Stable-Baselines3의 `--device auto`는 CUDA를 사용할 수 있으면 GPU를 사용하고, 사용할 수 없으면 CPU로 돌아갑니다. GPU 사용을 명시적으로 요구하려면 `--device cuda`를 사용하세요.
+
+개발 중 `whg_swf_gym`을 editable package로 설치하고 싶다면 추가로 실행할 수 있습니다.
+
+```bash
+pip install -e .
+```
+
+프로젝트 루트에서 스크립트를 직접 실행하는 경우 필수는 아닙니다.
 
 ---
 
