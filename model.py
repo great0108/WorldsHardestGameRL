@@ -30,17 +30,19 @@ class WHGCNN(BaseFeaturesExtractor):
                 c1,
                 kernel_size=8,
                 stride=4,
-                padding=0,
+                padding=(0, 1),
             ),
             nn.ReLU(),
+
             nn.Conv2d(
                 c1,
                 c2,
-                kernel_size=4,
+                kernel_size=5,
                 stride=2,
                 padding=0,
             ),
             nn.ReLU(),
+
             nn.Conv2d(
                 c2,
                 c3,

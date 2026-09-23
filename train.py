@@ -1258,14 +1258,14 @@ def main():
     # execute main(), so they avoid loading PyTorch/CUDA/cuDNN.
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
-    from whg_models import WHGCNN
+    from model import WHGCNN
 
     WHGMetricsCallback, WHGEvalCallback = _make_callback_classes()
 
     ap = argparse.ArgumentParser(
         description="Pixel PPO with exact spatial geometry reward shaping"
     )
-    ap.add_argument("--level", type=int, default=3, choices=range(1, 31))
+    ap.add_argument("--level", type=int, default=1, choices=range(1, 31))
     ap.add_argument("--steps", type=int, default=6_000_000)
     ap.add_argument("--n-envs", type=int, default=128)
     ap.add_argument(
@@ -1354,7 +1354,7 @@ def main():
         "--eval-episodes", type=int, default=10,
         help="deterministic eval episodes across randomized start phases",
     )
-    ap.add_argument("--out", default="runs/level03")
+    ap.add_argument("--out", default="runs/level01")
     ap.add_argument(
         "--resume", default=None,
         help="saved PPO .zip; keep width/height/frame-stack identical",
