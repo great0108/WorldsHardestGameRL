@@ -1265,8 +1265,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="Pixel PPO with exact spatial geometry reward shaping"
     )
-    ap.add_argument("--level", type=int, default=1, choices=range(1, 31))
-    ap.add_argument("--steps", type=int, default=6_000_000)
+    ap.add_argument("--level", type=int, default=6, choices=range(1, 31))
+    ap.add_argument("--steps", type=int, default=20_000_000)
     ap.add_argument("--n-envs", type=int, default=128)
     ap.add_argument(
         "--shared-observations",
@@ -1322,11 +1322,11 @@ def main():
     ap.add_argument("--n-steps", type=int, default=128, help="rollout steps per environment")
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--gamma", type=float, default=0.99)
-    ap.add_argument("--gae-lambda", type=float, default=0.9)
-    ap.add_argument("--ent-coef", type=float, default=0.03)
+    ap.add_argument("--gae-lambda", type=float, default=0.8)
+    ap.add_argument("--ent-coef", type=float, default=0.05)
 
-    ap.add_argument("--step-penalty", type=float, default=-0.003)
-    ap.add_argument("--progress-scale", type=float, default=0.05)
+    ap.add_argument("--step-penalty", type=float, default=-0.002)
+    ap.add_argument("--progress-scale", type=float, default=0.1)
     ap.add_argument("--death-penalty", type=float, default=-1.0)
     ap.add_argument("--checkpoint-bonus", type=float, default=1.0)
     ap.add_argument("--coin-bonus", type=float, default=1.0)
@@ -1354,7 +1354,7 @@ def main():
         "--eval-episodes", type=int, default=10,
         help="deterministic eval episodes across randomized start phases",
     )
-    ap.add_argument("--out", default="runs/level01")
+    ap.add_argument("--out", default="runs/level06")
     ap.add_argument(
         "--resume", default=None,
         help="saved PPO .zip; keep width/height/frame-stack identical",
