@@ -425,6 +425,7 @@ class RandomNoopFrameStack(gym.Wrapper):
         agent_max_steps: int,
         rng_seed: int,
         frame_skip: int = 1,
+        max_checkpoint_respawns: int = 0,
         reset_cache_dir: str | Path,
     ):
         super().__init__(env)
@@ -434,6 +435,10 @@ class RandomNoopFrameStack(gym.Wrapper):
         # agent_max_steps remains a limit in real Flash frames.
         self.agent_max_steps = int(agent_max_steps)
         self.frame_skip = int(frame_skip)
+        # 0 means unlimited. When positive, this many deaths are allowed to
+        # respawn at the current checkpoint; the next death ends the Gym episode
+        # so VecEnv reset starts the level from the beginning again.
+        self.max_checkpoint_respawns = int(max_checkpoint_respawns)
         self.reset_cache_dir = Path(reset_cache_dir)
         self._rng = np.random.default_rng(int(rng_seed))
 
@@ -447,6 +452,8 @@ class RandomNoopFrameStack(gym.Wrapper):
             raise ValueError("agent_max_steps must be >= 1")
         if self.frame_skip < 1:
             raise ValueError("frame_skip must be >= 1")
+        if self.max_checkpoint_respawns < 0:
+            raise ValueError("max_checkpoint_respawns must be >= 0")
 
         space = env.observation_space
         if not isinstance(space, gym.spaces.Box) or len(space.shape) != 3:
@@ -463,6 +470,7 @@ class RandomNoopFrameStack(gym.Wrapper):
 
         self._start_delay_frames = 0
         self._agent_flash_frames = 0   # real 30-FPS game frames
+        self._deaths_this_episode = 0
 
         # The training pipeline always places PathProgressReward directly below
         # this wrapper.
@@ -620,6 +628,7 @@ class RandomNoopFrameStack(gym.Wrapper):
 
         self._start_delay_frames = delay
         self._agent_flash_frames = 0
+        self._deaths_this_episode = 0
         self._last_reset_ms = (time.perf_counter() - t0) * 1000.0
         return self._stack.copy(), out_info
 
@@ -656,9 +665,26 @@ class RandomNoopFrameStack(gym.Wrapper):
             self._agent_flash_frames += 1
             self._push(obs)
 
-            any_death_triggered |= bool(info.get("death_triggered", False))
+            death_triggered_now = bool(info.get("death_triggered", False))
+            any_death_triggered |= death_triggered_now
             any_death_completed |= bool(info.get("death_completed", False))
             any_level_cleared |= bool(info.get("level_cleared_this_step", False))
+
+            if death_triggered_now:
+                self._deaths_this_episode += 1
+                # Example with max_checkpoint_respawns=5:
+                # deaths #1..#5 are allowed to respawn at the current checkpoint;
+                # death #6 terminates this Gym episode, causing a full reset.
+                if (
+                    self.max_checkpoint_respawns > 0
+                    and self._deaths_this_episode > self.max_checkpoint_respawns
+                    and not terminated
+                    and not truncated
+                ):
+                    terminated = True
+                    info = dict(info)
+                    info["checkpoint_respawn_limit_reached"] = True
+
             any_game_cleared |= bool(info.get("game_cleared_this_step", False))
             if info.get("checkpoint_reached"):
                 checkpoint_reached = info.get("checkpoint_reached")
@@ -695,6 +721,8 @@ class RandomNoopFrameStack(gym.Wrapper):
             info["coins_reset_this_step"] = True
         info["start_delay_frames"] = self._start_delay_frames
         info["agent_flash_frames"] = self._agent_flash_frames
+        info["deaths_this_episode"] = self._deaths_this_episode
+        info["max_checkpoint_respawns"] = self.max_checkpoint_respawns
         info["reset_ms"] = self._last_reset_ms
         return self._stack.copy(), total_reward, terminated, truncated, info
 
@@ -1033,6 +1061,13 @@ def make_worker(args, rank: int, *, eval_mode: bool = False):
             agent_max_steps=args.max_steps,
             rng_seed=rng_seed,
             frame_skip=args.frame_skip,
+            # This limit is a training-data balancing device. Evaluation keeps
+            # the game's normal checkpoint-respawn behavior (subject to timeout).
+            max_checkpoint_respawns=(
+                0
+                if eval_mode or args.death_ends_episode
+                else args.max_checkpoint_respawns
+            ),
             reset_cache_dir=args.reset_cache,
         )
         env.action_space.seed(rng_seed)
@@ -1335,8 +1370,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="Pixel PPO with exact spatial geometry reward shaping"
     )
-    ap.add_argument("--level", type=int, default=1, choices=range(1, 31))
-    ap.add_argument("--steps", type=int, default=6_000_000)
+    ap.add_argument("--level", type=int, default=6, choices=range(1, 31))
+    ap.add_argument("--steps", type=int, default=10_000_000)
     ap.add_argument("--n-envs", type=int, default=128)
     ap.add_argument(
         "--shared-observations",
@@ -1396,6 +1431,17 @@ def main():
             "across repeated attempts"
         ),
     )
+    ap.add_argument(
+        "--max-checkpoint-respawns",
+        type=int,
+        default=5,
+        help=(
+            "when --no-death-ends-episode is active, allow this many checkpoint "
+            "respawns in one training episode, then end the episode on the next "
+            "death so training returns to the level start; 0 means unlimited. "
+            "This limit is disabled for evaluation."
+        ),
+    )
 
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="auto")
@@ -1403,13 +1449,13 @@ def main():
     ap.add_argument("--n-steps", type=int, default=128, help="rollout steps per environment")
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--gamma", type=float, default=0.99)
-    ap.add_argument("--gae-lambda", type=float, default=0.9)
-    ap.add_argument("--ent-coef", type=float, default=0.03)
+    ap.add_argument("--gae-lambda", type=float, default=0.8)
+    ap.add_argument("--ent-coef", type=float, default=0.05)
 
     ap.add_argument(
         "--intrinsic",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="enable NGU-lite episodic k-NN novelty during training only",
     )
     ap.add_argument(
@@ -1476,7 +1522,7 @@ def main():
         "--eval-episodes", type=int, default=10,
         help="deterministic eval episodes across randomized start phases",
     )
-    ap.add_argument("--out", default="runs/level01")
+    ap.add_argument("--out", default="runs/level06")
     ap.add_argument(
         "--resume", default=None,
         help="saved PPO .zip; keep width/height/frame-stack identical",
@@ -1491,6 +1537,8 @@ def main():
         ap.error("--frame-skip must be >= 1")
     if args.max_steps < 1:
         ap.error("--max-steps must be >= 1")
+    if args.max_checkpoint_respawns < 0:
+        ap.error("--max-checkpoint-respawns must be >= 0")
     if args.delay_min < 0:
         ap.error("--delay-min must be >= 0")
     if args.delay_max < args.delay_min:
@@ -1561,6 +1609,15 @@ def main():
         f"({args.eval_delay_min/30:.3f}..{args.eval_delay_max/30:.3f}s)"
     )
     print(f"Death ends episode:   {args.death_ends_episode}")
+    if args.death_ends_episode:
+        print("Checkpoint respawns:  disabled (death already ends episode)")
+    else:
+        respawn_text = (
+            "unlimited"
+            if args.max_checkpoint_respawns == 0
+            else f"{args.max_checkpoint_respawns} per training episode"
+        )
+        print(f"Checkpoint respawns:  {respawn_text}")
     print(
         f"NGU-lite intrinsic:   {args.intrinsic}"
         + (f" (beta={args.intrinsic_beta:g}, memory={args.intrinsic_memory_size}, "
