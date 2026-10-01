@@ -1,0 +1,10 @@
+NGU-lite 기존 파일에서 수정된 파일
+
+- train.py
+  intrinsic reward 옵션/래퍼 연결, 저장/재개, 로그 관련 변경
+
+- whg_swf_gym/pixel_rl.py
+  death_ends_episode=False 사용 시 respawn/progress 처리 및 frame-skip 이벤트 처리 보완
+
+- README.md
+  NGU-lite 실행 옵션 및 사용 예시 문서 추가

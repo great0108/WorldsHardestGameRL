@@ -634,6 +634,15 @@ class RandomNoopFrameStack(gym.Wrapper):
         terminated = False
         truncated = False
         info = {}
+        # Preserve one-frame events that could otherwise disappear when
+        # frame_skip > 1 and the last repeated frame has no event flag.
+        any_death_triggered = False
+        any_death_completed = False
+        any_level_cleared = False
+        any_game_cleared = False
+        checkpoint_reached = None
+        coins_collected = 0
+        coins_reset = False
         for _ in range(self.frame_skip):
             # Keep --max-steps defined in real Flash frames.
             if self._agent_flash_frames >= self.agent_max_steps:
@@ -646,6 +655,15 @@ class RandomNoopFrameStack(gym.Wrapper):
             total_reward += float(reward)
             self._agent_flash_frames += 1
             self._push(obs)
+
+            any_death_triggered |= bool(info.get("death_triggered", False))
+            any_death_completed |= bool(info.get("death_completed", False))
+            any_level_cleared |= bool(info.get("level_cleared_this_step", False))
+            any_game_cleared |= bool(info.get("game_cleared_this_step", False))
+            if info.get("checkpoint_reached"):
+                checkpoint_reached = info.get("checkpoint_reached")
+            coins_collected += int(info.get("coins_collected_this_step", 0) or 0)
+            coins_reset |= bool(info.get("coins_reset_this_step", False))
 
             if (
                 self._agent_flash_frames >= self.agent_max_steps
@@ -660,6 +678,21 @@ class RandomNoopFrameStack(gym.Wrapper):
                 break
 
         info = dict(info)
+        if any_death_triggered:
+            info["death_triggered"] = True
+        if any_death_completed:
+            info["death_completed"] = True
+        if any_level_cleared:
+            info["level_cleared_this_step"] = True
+            info["is_success"] = True
+        if any_game_cleared:
+            info["game_cleared_this_step"] = True
+        if checkpoint_reached is not None:
+            info["checkpoint_reached"] = checkpoint_reached
+        if coins_collected:
+            info["coins_collected_this_step"] = coins_collected
+        if coins_reset:
+            info["coins_reset_this_step"] = True
         info["start_delay_frames"] = self._start_delay_frames
         info["agent_flash_frames"] = self._agent_flash_frames
         info["reset_ms"] = self._last_reset_ms
@@ -682,6 +715,9 @@ def _make_callback_classes():
             self.start_delays = deque(maxlen=window)
             self.flash_lengths = deque(maxlen=window)
             self.reset_ms = deque(maxlen=window)
+            self.intrinsic_bonus = deque(maxlen=max(1000, window * 10))
+            self.intrinsic_scaled = deque(maxlen=max(1000, window * 10))
+            self.inverse_loss = deque(maxlen=max(1000, window * 10))
             self.deaths = 0
 
         def _on_step(self) -> bool:
@@ -691,6 +727,10 @@ def _make_callback_classes():
             for info in infos:
                 if info.get("death_triggered", False):
                     self.deaths += 1
+                if "reward_intrinsic" in info:
+                    self.intrinsic_bonus.append(float(info["reward_intrinsic"]))
+                    self.intrinsic_scaled.append(float(info.get("reward_intrinsic_scaled", 0.0)))
+                    self.inverse_loss.append(float(info.get("intrinsic_inverse_loss", 0.0)))
 
             for done, info in zip(dones, infos):
                 if done:
@@ -720,6 +760,16 @@ def _make_callback_classes():
                 if self.reset_ms:
                     self.logger.record(
                         "whg/reset_ms_100", float(np.mean(self.reset_ms))
+                    )
+                if self.intrinsic_bonus:
+                    self.logger.record(
+                        "intrinsic/novelty_mean", float(np.mean(self.intrinsic_bonus))
+                    )
+                    self.logger.record(
+                        "intrinsic/scaled_reward_mean", float(np.mean(self.intrinsic_scaled))
+                    )
+                    self.logger.record(
+                        "intrinsic/inverse_loss_mean", float(np.mean(self.inverse_loss))
                     )
                 self.logger.record("whg/deaths_total", float(self.deaths))
             return True
@@ -936,7 +986,7 @@ def make_worker(args, rank: int, *, eval_mode: bool = False):
             level=args.level,
             observation_mode="pixels",
             reward_mode="zero",
-            death_ends_episode=True,
+            death_ends_episode=args.death_ends_episode,
             max_steps=core_max_steps,
             # legacy_exact keeps the exact old 550x400 rasterization + Pillow
             # resize, but performs the resize inside Renderer before converting
@@ -1257,7 +1307,7 @@ def main():
     # Spawned environment workers re-import this training file, but they do not
     # execute main(), so they avoid loading PyTorch/CUDA/cuDNN.
     from stable_baselines3 import PPO
-    from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
+    from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
     from model import WHGCNN
 
     WHGMetricsCallback, WHGEvalCallback = _make_callback_classes()
@@ -1316,6 +1366,17 @@ def main():
         help="max agent-controlled Flash frames; pre-roll frames are extra",
     )
 
+    ap.add_argument(
+        "--death-ends-episode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "end the Gym episode immediately on death; default is false so the "
+            "original checkpoint respawn plays out and episodic novelty persists "
+            "across repeated attempts"
+        ),
+    )
+
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--learning-rate", type=float, default=1e-4)
@@ -1324,6 +1385,31 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--gae-lambda", type=float, default=0.9)
     ap.add_argument("--ent-coef", type=float, default=0.03)
+
+    ap.add_argument(
+        "--intrinsic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable NGU-lite episodic k-NN novelty during training only",
+    )
+    ap.add_argument(
+        "--intrinsic-beta", type=float, default=0.01,
+        help="scale applied to the normalized [0,1] episodic novelty bonus",
+    )
+    ap.add_argument("--intrinsic-embedding-dim", type=int, default=64)
+    ap.add_argument("--intrinsic-memory-size", type=int, default=512)
+    ap.add_argument("--intrinsic-k", type=int, default=10)
+    ap.add_argument("--intrinsic-inverse-lr", type=float, default=1e-4)
+    ap.add_argument(
+        "--intrinsic-train-every", type=int, default=4,
+        help="train inverse dynamics every N vector-env steps",
+    )
+    ap.add_argument("--intrinsic-batch-size", type=int, default=128)
+    ap.add_argument("--intrinsic-target-tau", type=float, default=0.01)
+    ap.add_argument(
+        "--intrinsic-state", default=None,
+        help="optional NGU-lite auxiliary .pt state to load when resuming training",
+    )
 
     ap.add_argument("--step-penalty", type=float, default=-0.003)
     ap.add_argument("--progress-scale", type=float, default=0.05)
@@ -1378,6 +1464,21 @@ def main():
     if args.eval_episodes < 1:
         ap.error("--eval-episodes must be >= 1")
 
+    if args.intrinsic_beta < 0:
+        ap.error("--intrinsic-beta must be >= 0")
+    if args.intrinsic_embedding_dim < 2:
+        ap.error("--intrinsic-embedding-dim must be >= 2")
+    if args.intrinsic_memory_size < 2:
+        ap.error("--intrinsic-memory-size must be >= 2")
+    if args.intrinsic_k < 1:
+        ap.error("--intrinsic-k must be >= 1")
+    if args.intrinsic_train_every < 1:
+        ap.error("--intrinsic-train-every must be >= 1")
+    if args.intrinsic_batch_size < 1:
+        ap.error("--intrinsic-batch-size must be >= 1")
+    if not 0.0 < args.intrinsic_target_tau <= 1.0:
+        ap.error("--intrinsic-target-tau must be in (0, 1]")
+
     if args.eval_delay_min < 0:
         ap.error("--eval-delay-min must be >= 0")
     if args.eval_delay_max < args.eval_delay_min:
@@ -1415,8 +1516,40 @@ def main():
         f"Evaluation delay:     {args.eval_delay_min}..{args.eval_delay_max} frames "
         f"({args.eval_delay_min/30:.3f}..{args.eval_delay_max/30:.3f}s)"
     )
+    print(f"Death ends episode:   {args.death_ends_episode}")
+    print(
+        f"NGU-lite intrinsic:   {args.intrinsic}"
+        + (f" (beta={args.intrinsic_beta:g}, memory={args.intrinsic_memory_size}, "
+           f"k={args.intrinsic_k})" if args.intrinsic else "")
+    )
 
     env = make_train_vec_env(args)
+    intrinsic_env = None
+    if args.intrinsic:
+        # Import only in main(): spawned environment workers must stay torch-free.
+        from intrinsic import EpisodicNoveltyVecEnv
+
+        intrinsic_env = EpisodicNoveltyVecEnv(
+            env,
+            beta=args.intrinsic_beta,
+            embedding_dim=args.intrinsic_embedding_dim,
+            memory_size=args.intrinsic_memory_size,
+            k_neighbors=args.intrinsic_k,
+            inverse_lr=args.intrinsic_inverse_lr,
+            inverse_train_every=args.intrinsic_train_every,
+            inverse_batch_size=args.intrinsic_batch_size,
+            target_tau=args.intrinsic_target_tau,
+            device=args.device,
+        )
+        env = intrinsic_env
+        if args.intrinsic_state:
+            intrinsic_env.load_intrinsic_state(args.intrinsic_state)
+            print(f"Loaded NGU-lite state from {args.intrinsic_state}")
+        elif args.resume:
+            print(
+                "WARNING: resuming PPO without --intrinsic-state; "
+                "the NGU-lite encoder/memory starts fresh."
+            )
     print("Vector observation space:", env.observation_space)
     print(
         "Expected stacked shape: (%d, %d, %d)"
@@ -1467,6 +1600,30 @@ def main():
         ),
     ]
 
+    if intrinsic_env is not None:
+        class IntrinsicStateCallback(BaseCallback):
+            def __init__(self, wrapped_env, save_every_timesteps: int, save_dir: Path):
+                super().__init__()
+                self.wrapped_env = wrapped_env
+                self.save_every_timesteps = int(save_every_timesteps)
+                self.save_dir = Path(save_dir)
+                self.last_save = 0
+
+            def _on_step(self) -> bool:
+                if self.num_timesteps - self.last_save >= self.save_every_timesteps:
+                    self.last_save = self.num_timesteps
+                    path = self.save_dir / f"ngu_{self.num_timesteps}_steps.pt"
+                    self.wrapped_env.save_intrinsic_state(path)
+                return True
+
+        callback_items.append(
+            IntrinsicStateCallback(
+                intrinsic_env,
+                save_every_timesteps=1_000_000,
+                save_dir=out / "checkpoints",
+            )
+        )
+
     if args.eval_every > 0:
         callback_items.append(
             WHGEvalCallback(
@@ -1489,6 +1646,10 @@ def main():
         )
         model.save(str(out / "final_model"))
         print(f"Saved model to {out / 'final_model.zip'}")
+        if intrinsic_env is not None:
+            intrinsic_path = out / "final_intrinsic.pt"
+            intrinsic_env.save_intrinsic_state(intrinsic_path)
+            print(f"Saved NGU-lite state to {intrinsic_path}")
     finally:
         env.close()
 

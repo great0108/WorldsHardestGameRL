@@ -310,3 +310,59 @@ python evaluate.py --help
 python watch.py --help
 python play.py --help
 ```
+
+# NGU-lite 탐험 보너스 (선택 기능)
+
+`train.py`에는 기존 extrinsic reward를 그대로 둔 채 학습 중에만 episodic novelty를 더하는 NGU-inspired 옵션이 있습니다.
+
+구성은 다음과 같습니다.
+
+- inverse-dynamics encoder: 연속 관측에서 어떤 action이 실행됐는지 예측하여 플레이어가 통제할 수 있는 시각 변화에 민감한 embedding을 학습
+- target encoder: embedding 공간이 너무 빨리 움직이지 않도록 EMA로 천천히 갱신
+- episodic k-NN memory: 각 vector environment가 이번 episode에서 방문한 embedding을 저장
+- intrinsic reward: memory에서 멀리 떨어진 새로운 상태일수록 큰 `[0, 1]` novelty를 부여
+- death/fade frame: 플레이어가 통제할 수 없는 화면 변화이므로 intrinsic reward와 inverse-dynamics 학습에서 제외
+
+평가 환경에는 intrinsic reward가 들어가지 않습니다. 또한 NGU wrapper를 `VecMonitor` 바깥에 두기 때문에 TensorBoard의 기존 episode reward는 extrinsic reward 기준으로 유지됩니다.
+
+레벨 6에서 시작해볼 예시는 다음과 같습니다.
+
+```bash
+python train.py \
+  --level 6 \
+  --intrinsic \
+  --no-death-ends-episode \
+  --intrinsic-beta 0.01 \
+  --intrinsic-memory-size 512 \
+  --intrinsic-k 10 \
+  --frame-stack 3 \
+  --frame-skip 1 \
+  --delay-min 0 \
+  --delay-max 83 \
+  --eval-delay-min 0 \
+  --eval-delay-max 83 \
+  --out runs/level06_ngu
+```
+
+`--no-death-ends-episode`가 중요한 이유는 죽은 뒤 원래 게임의 checkpoint respawn을 계속 진행하면서 같은 episodic memory를 유지하기 위해서입니다. 그러면 이미 여러 번 시도한 직진 경로의 novelty는 낮아지고, 아직 가보지 않은 옆/우회 공간을 탐색할 동기가 생깁니다.
+
+추가 TensorBoard 지표:
+
+```text
+intrinsic/novelty_mean
+intrinsic/scaled_reward_mean
+intrinsic/inverse_loss_mean
+```
+
+`intrinsic/novelty_mean`이 오랫동안 거의 `1.0`이면 embedding이 상태를 너무 쉽게 전부 다르게 보고 있을 가능성이 있습니다. 반대로 너무 빨리 `0`에 붙으면 `--intrinsic-beta`를 올리기 전에 embedding/inverse loss가 정상적으로 학습되는지 먼저 확인하는 것이 좋습니다.
+
+NGU-lite 보조 모델은 `final_intrinsic.pt`에 저장되며, 100만 timestep마다 `checkpoints/ngu_*_steps.pt`도 저장됩니다. PPO를 이어서 학습할 때는 대응되는 보조 state를 함께 지정할 수 있습니다.
+
+```bash
+python train.py \
+  --level 6 \
+  --intrinsic \
+  --resume runs/level06_ngu/checkpoints/level06_pixels_1000000_steps.zip \
+  --intrinsic-state runs/level06_ngu/checkpoints/ngu_1000000_steps.pt \
+  --out runs/level06_ngu
+```

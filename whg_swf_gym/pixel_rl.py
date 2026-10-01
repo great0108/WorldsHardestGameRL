@@ -104,9 +104,12 @@ class PathProgressReward(gym.Wrapper):
 
         progress = 0.0
         # Do not compare potentials across different objectives (e.g. after a
-        # checkpoint or coin), and do not reward the position reached on a
-        # death-triggering frame.
-        if not objective_changed and not info.get("death_triggered", False):
+        # checkpoint or coin), and do not reward death/respawn teleportation.
+        if (
+            not objective_changed
+            and not info.get("death_triggered", False)
+            and not info.get("death_completed", False)
+        ):
             progress = float(old_distance - new_distance)
             # Do not clip exact potential differences. Clipping only one side of
             # a multi-step cycle can create positive-return reward loops.
