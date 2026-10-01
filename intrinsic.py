@@ -9,6 +9,8 @@ than a full Agent57/NGU reproduction:
   visual changes;
 * a slowly moving target encoder provides a more stable embedding space;
 * each vector-environment instance keeps its own episodic k-NN memory;
+* the episodic pseudo-count follows NGU Algorithm 1 closely: normalized
+  k-NN squared distances -> cluster threshold -> inverse kernel -> 1/s;
 * novel states receive an intrinsic reward during training only.
 
 The game/extrinsic reward is not changed.  Evaluation environments should not
@@ -103,9 +105,11 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
         inverse_lr: float = 1e-4,
         inverse_train_every: int = 4,
         inverse_batch_size: int = 128,
-        target_tau: float = 0.01,
-        kernel_epsilon: float = 1e-3,
-        distance_ema: float = 0.99,
+        target_tau: float = 0.001,
+        cluster_distance: float = 0.008,
+        kernel_epsilon: float = 1e-4,
+        pseudo_count: float = 0.001,
+        max_similarity: float = 8.0,
         device: str = "auto",
     ):
         super().__init__(venv)
@@ -116,8 +120,10 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
         self.inverse_train_every = int(inverse_train_every)
         self.inverse_batch_size = int(inverse_batch_size)
         self.target_tau = float(target_tau)
+        self.cluster_distance = float(cluster_distance)
         self.kernel_epsilon = float(kernel_epsilon)
-        self.distance_ema_decay = float(distance_ema)
+        self.pseudo_count = float(pseudo_count)
+        self.max_similarity = float(max_similarity)
 
         if self.beta < 0:
             raise ValueError("intrinsic beta must be >= 0")
@@ -133,8 +139,14 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
             raise ValueError("inverse_batch_size must be >= 1")
         if not 0.0 < self.target_tau <= 1.0:
             raise ValueError("target_tau must be in (0, 1]")
-        if not 0.0 < self.distance_ema_decay < 1.0:
-            raise ValueError("distance_ema must be in (0, 1)")
+        if self.cluster_distance < 0.0:
+            raise ValueError("cluster_distance must be >= 0")
+        if self.kernel_epsilon <= 0.0:
+            raise ValueError("kernel_epsilon must be > 0")
+        if self.pseudo_count <= 0.0:
+            raise ValueError("pseudo_count must be > 0")
+        if self.max_similarity <= 0.0:
+            raise ValueError("max_similarity must be > 0")
 
         if not hasattr(self.action_space, "n"):
             raise ValueError("NGU-lite currently requires a discrete action space")
@@ -155,7 +167,13 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
         self._last_obs: np.ndarray | None = None
         self._pending_actions: np.ndarray | None = None
         self._vec_steps = 0
-        self._distance_scale = 1.0
+
+        # NGU Algorithm 1 normalizes the k-NN squared distances by a running
+        # mean d_m^2.  Keep one pooled statistic across all vector environments.
+        # Updating it once per vector step avoids accidentally applying the
+        # running update N_env times per environment step.
+        self._distance_mean = 1.0
+        self._distance_count = 0
         self._last_inverse_loss = 0.0
 
     @th.no_grad()
@@ -207,37 +225,67 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
         self._update_target()
         self._last_inverse_loss = float(loss.detach().cpu())
 
-    def _novelty(self, env_idx: int, z: np.ndarray) -> float:
+    def _knn_squared_distances(self, env_idx: int, z: np.ndarray) -> np.ndarray:
+        """Return squared distances to the available k nearest episodic states."""
         memory = self._memories[env_idx]
         if not memory:
-            return 1.0
+            return np.empty(0, dtype=np.float32)
 
         mem = np.asarray(memory, dtype=np.float32)
         d2 = np.sum((mem - z[None, :]) ** 2, axis=1)
         k = min(self.k_neighbors, int(d2.size))
-        nearest = np.partition(d2, k - 1)[:k]
-        mean_d2 = float(np.mean(nearest))
+        return np.partition(d2, k - 1)[:k].astype(np.float32, copy=False)
 
-        # Normalize distances with a slowly moving global scale.  L2-normalized
-        # embeddings make this well behaved even while the inverse encoder is
-        # still learning.
-        if np.isfinite(mean_d2) and mean_d2 > 1e-8:
-            self._distance_scale = (
-                self.distance_ema_decay * self._distance_scale
-                + (1.0 - self.distance_ema_decay) * mean_d2
-            )
+    def _update_distance_mean(self, distance_batches: list[np.ndarray]) -> None:
+        """Update pooled running d_m^2 once for the whole vector step.
 
-        normalized = nearest / max(self._distance_scale, 1e-6)
-        kernels = self.kernel_epsilon / (normalized + self.kernel_epsilon)
-        similarity = float(np.sqrt(np.sum(kernels))) + 1e-3
-        raw = 1.0 / similarity
+        NGU Algorithm 1 uses a running average of squared k-NN distances.
+        A cumulative running mean is used here, matching the intent of the
+        original pseudo-count normalization while remaining independent of the
+        number of parallel environments.
+        """
+        usable = [d[np.isfinite(d)] for d in distance_batches if d.size]
+        if not usable:
+            return
+        flat = np.concatenate(usable).astype(np.float64, copy=False)
+        if flat.size == 0:
+            return
 
-        # Map an exact/repeated-state neighborhood to ~0 and very distant states
-        # toward 1.  This prevents intrinsic reward from degenerating into a
-        # generic positive living reward.
-        close_floor = 1.0 / (np.sqrt(float(k)) + 1e-3)
-        bonus = (raw - close_floor) / max(1.0 - close_floor, 1e-6)
-        return float(np.clip(bonus, 0.0, 1.0))
+        batch_count = int(flat.size)
+        batch_mean = float(np.mean(flat))
+        if self._distance_count == 0:
+            self._distance_mean = batch_mean
+            self._distance_count = batch_count
+            return
+
+        total = self._distance_count + batch_count
+        self._distance_mean += (batch_mean - self._distance_mean) * (batch_count / total)
+        self._distance_count = total
+
+    def _episodic_reward_from_distances(
+        self, nearest_d2: np.ndarray
+    ) -> tuple[float, float]:
+        """Compute NGU Algorithm-1 episodic pseudo-count reward.
+
+        d_n = max(d_k / d_m^2 - xi, 0)
+        K   = epsilon / (d_n + epsilon)
+        s   = sqrt(sum(K)) + c
+        r   = 0 if s > s_m else 1 / s
+        """
+        if nearest_d2.size == 0:
+            # No pseudo-count exists yet.  This also avoids an artificial huge
+            # 1/c reward on the first state of every episode.
+            return 0.0, 0.0
+
+        distance_mean = max(float(self._distance_mean), 1e-8)
+        normalized = nearest_d2.astype(np.float64, copy=False) / distance_mean
+        clustered = np.maximum(normalized - self.cluster_distance, 0.0)
+        kernels = self.kernel_epsilon / (clustered + self.kernel_epsilon)
+        similarity = float(np.sqrt(np.sum(kernels)) + self.pseudo_count)
+
+        if not np.isfinite(similarity) or similarity > self.max_similarity:
+            return 0.0, similarity
+        return float(1.0 / max(similarity, 1e-12)), similarity
 
     def _transition_observations(
         self, new_obs: np.ndarray, dones: np.ndarray, infos: list[dict]
@@ -290,10 +338,30 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
         )
 
         z_next = self._embed(transition_next)
-        bonuses = np.zeros(self.num_envs, dtype=np.float32)
+
+        # First collect every environment's k-NN distances.  Then update the
+        # shared d_m^2 statistic ONCE for this vector step, as opposed to once
+        # per environment.  All environments in the same vector step therefore
+        # use the same normalization scale.
+        knn_distances: list[np.ndarray] = []
         for i in range(self.num_envs):
             if controllable[i]:
-                bonuses[i] = self._novelty(i, z_next[i])
+                knn_distances.append(self._knn_squared_distances(i, z_next[i]))
+            else:
+                knn_distances.append(np.empty(0, dtype=np.float32))
+        self._update_distance_mean(knn_distances)
+
+        bonuses = np.zeros(self.num_envs, dtype=np.float32)
+        similarities = np.zeros(self.num_envs, dtype=np.float32)
+        knn_mean_d2 = np.zeros(self.num_envs, dtype=np.float32)
+        for i in range(self.num_envs):
+            nearest = knn_distances[i]
+            if controllable[i] and nearest.size:
+                bonus, similarity = self._episodic_reward_from_distances(nearest)
+                bonuses[i] = bonus
+                similarities[i] = similarity
+                knn_mean_d2[i] = float(np.mean(nearest))
+
             # Even zero-bonus respawn states enter memory so repeatedly taking
             # the same route after a death quickly becomes familiar.
             self._memories[i].append(z_next[i].astype(np.float16))
@@ -305,6 +373,9 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
             info["reward_intrinsic"] = float(bonuses[i])
             info["reward_intrinsic_scaled"] = float(self.beta * bonuses[i])
             info["reward_train_total"] = float(train_rewards[i])
+            info["intrinsic_similarity"] = float(similarities[i])
+            info["intrinsic_knn_mean_d2"] = float(knn_mean_d2[i])
+            info["intrinsic_distance_mean"] = float(self._distance_mean)
             info["intrinsic_inverse_loss"] = float(self._last_inverse_loss)
             info["intrinsic_memory_size"] = int(len(self._memories[i]))
 
@@ -329,13 +400,18 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
                 "model": self.model.state_dict(),
                 "target_encoder": self.target_encoder.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "distance_scale": float(self._distance_scale),
+                "distance_mean": float(self._distance_mean),
+                "distance_count": int(self._distance_count),
                 "vec_steps": int(self._vec_steps),
                 "config": {
                     "beta": self.beta,
                     "embedding_dim": self.embedding_dim,
                     "memory_size": self.memory_size,
                     "k_neighbors": self.k_neighbors,
+                    "cluster_distance": self.cluster_distance,
+                    "kernel_epsilon": self.kernel_epsilon,
+                    "pseudo_count": self.pseudo_count,
+                    "max_similarity": self.max_similarity,
                 },
             },
             path,
@@ -347,5 +423,10 @@ class EpisodicNoveltyVecEnv(VecEnvWrapper):
         self.target_encoder.load_state_dict(payload["target_encoder"])
         if "optimizer" in payload:
             self.optimizer.load_state_dict(payload["optimizer"])
-        self._distance_scale = float(payload.get("distance_scale", 1.0))
+        # Backward compatibility: old NGU-lite checkpoints stored a
+        # ``distance_scale`` EMA instead of NGU's pooled d_m^2 statistic.
+        self._distance_mean = float(
+            payload.get("distance_mean", payload.get("distance_scale", 1.0))
+        )
+        self._distance_count = int(payload.get("distance_count", 0))
         self._vec_steps = int(payload.get("vec_steps", 0))

@@ -718,6 +718,9 @@ def _make_callback_classes():
             self.intrinsic_bonus = deque(maxlen=max(1000, window * 10))
             self.intrinsic_scaled = deque(maxlen=max(1000, window * 10))
             self.inverse_loss = deque(maxlen=max(1000, window * 10))
+            self.intrinsic_similarity = deque(maxlen=max(1000, window * 10))
+            self.intrinsic_knn_d2 = deque(maxlen=max(1000, window * 10))
+            self.intrinsic_distance_mean = deque(maxlen=max(1000, window * 10))
             self.deaths = 0
 
         def _on_step(self) -> bool:
@@ -731,6 +734,9 @@ def _make_callback_classes():
                     self.intrinsic_bonus.append(float(info["reward_intrinsic"]))
                     self.intrinsic_scaled.append(float(info.get("reward_intrinsic_scaled", 0.0)))
                     self.inverse_loss.append(float(info.get("intrinsic_inverse_loss", 0.0)))
+                    self.intrinsic_similarity.append(float(info.get("intrinsic_similarity", 0.0)))
+                    self.intrinsic_knn_d2.append(float(info.get("intrinsic_knn_mean_d2", 0.0)))
+                    self.intrinsic_distance_mean.append(float(info.get("intrinsic_distance_mean", 0.0)))
 
             for done, info in zip(dones, infos):
                 if done:
@@ -763,6 +769,11 @@ def _make_callback_classes():
                     )
                 if self.intrinsic_bonus:
                     self.logger.record(
+                        "intrinsic/episodic_reward_mean", float(np.mean(self.intrinsic_bonus))
+                    )
+                    # Keep the old tag as an alias so existing TensorBoard
+                    # comparisons do not silently lose the series.
+                    self.logger.record(
                         "intrinsic/novelty_mean", float(np.mean(self.intrinsic_bonus))
                     )
                     self.logger.record(
@@ -770,6 +781,15 @@ def _make_callback_classes():
                     )
                     self.logger.record(
                         "intrinsic/inverse_loss_mean", float(np.mean(self.inverse_loss))
+                    )
+                    self.logger.record(
+                        "intrinsic/similarity_mean", float(np.mean(self.intrinsic_similarity))
+                    )
+                    self.logger.record(
+                        "intrinsic/knn_mean_d2", float(np.mean(self.intrinsic_knn_d2))
+                    )
+                    self.logger.record(
+                        "intrinsic/distance_mean", float(np.mean(self.intrinsic_distance_mean))
                     )
                 self.logger.record("whg/deaths_total", float(self.deaths))
             return True
@@ -1315,8 +1335,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="Pixel PPO with exact spatial geometry reward shaping"
     )
-    ap.add_argument("--level", type=int, default=6, choices=range(1, 31))
-    ap.add_argument("--steps", type=int, default=20_000_000)
+    ap.add_argument("--level", type=int, default=1, choices=range(1, 31))
+    ap.add_argument("--steps", type=int, default=6_000_000)
     ap.add_argument("--n-envs", type=int, default=128)
     ap.add_argument(
         "--shared-observations",
@@ -1383,8 +1403,8 @@ def main():
     ap.add_argument("--n-steps", type=int, default=128, help="rollout steps per environment")
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--gamma", type=float, default=0.99)
-    ap.add_argument("--gae-lambda", type=float, default=0.8)
-    ap.add_argument("--ent-coef", type=float, default=0.05)
+    ap.add_argument("--gae-lambda", type=float, default=0.9)
+    ap.add_argument("--ent-coef", type=float, default=0.03)
 
     ap.add_argument(
         "--intrinsic",
@@ -1393,8 +1413,8 @@ def main():
         help="enable NGU-lite episodic k-NN novelty during training only",
     )
     ap.add_argument(
-        "--intrinsic-beta", type=float, default=0.01,
-        help="scale applied to the normalized [0,1] episodic novelty bonus",
+        "--intrinsic-beta", type=float, default=3e-4,
+        help="scale applied to NGU episodic pseudo-count reward (not clipped to [0,1])",
     )
     ap.add_argument("--intrinsic-embedding-dim", type=int, default=64)
     ap.add_argument("--intrinsic-memory-size", type=int, default=512)
@@ -1405,14 +1425,30 @@ def main():
         help="train inverse dynamics every N vector-env steps",
     )
     ap.add_argument("--intrinsic-batch-size", type=int, default=128)
-    ap.add_argument("--intrinsic-target-tau", type=float, default=0.01)
+    ap.add_argument("--intrinsic-target-tau", type=float, default=0.001)
+    ap.add_argument(
+        "--intrinsic-cluster-distance", type=float, default=0.008,
+        help="NGU pseudo-count cluster distance xi",
+    )
+    ap.add_argument(
+        "--intrinsic-kernel-epsilon", type=float, default=1e-4,
+        help="NGU inverse-kernel epsilon",
+    )
+    ap.add_argument(
+        "--intrinsic-pseudocount", type=float, default=0.001,
+        help="NGU pseudo-count constant c",
+    )
+    ap.add_argument(
+        "--intrinsic-max-similarity", type=float, default=8.0,
+        help="NGU maximum similarity s_m; reward is zero above this value",
+    )
     ap.add_argument(
         "--intrinsic-state", default=None,
         help="optional NGU-lite auxiliary .pt state to load when resuming training",
     )
 
-    ap.add_argument("--step-penalty", type=float, default=-0.002)
-    ap.add_argument("--progress-scale", type=float, default=0.1)
+    ap.add_argument("--step-penalty", type=float, default=-0.003)
+    ap.add_argument("--progress-scale", type=float, default=0.05)
     ap.add_argument("--death-penalty", type=float, default=-1.0)
     ap.add_argument("--checkpoint-bonus", type=float, default=1.0)
     ap.add_argument("--coin-bonus", type=float, default=1.0)
@@ -1440,7 +1476,7 @@ def main():
         "--eval-episodes", type=int, default=10,
         help="deterministic eval episodes across randomized start phases",
     )
-    ap.add_argument("--out", default="runs/level06")
+    ap.add_argument("--out", default="runs/level01")
     ap.add_argument(
         "--resume", default=None,
         help="saved PPO .zip; keep width/height/frame-stack identical",
@@ -1478,6 +1514,14 @@ def main():
         ap.error("--intrinsic-batch-size must be >= 1")
     if not 0.0 < args.intrinsic_target_tau <= 1.0:
         ap.error("--intrinsic-target-tau must be in (0, 1]")
+    if args.intrinsic_cluster_distance < 0:
+        ap.error("--intrinsic-cluster-distance must be >= 0")
+    if args.intrinsic_kernel_epsilon <= 0:
+        ap.error("--intrinsic-kernel-epsilon must be > 0")
+    if args.intrinsic_pseudocount <= 0:
+        ap.error("--intrinsic-pseudocount must be > 0")
+    if args.intrinsic_max_similarity <= 0:
+        ap.error("--intrinsic-max-similarity must be > 0")
 
     if args.eval_delay_min < 0:
         ap.error("--eval-delay-min must be >= 0")
@@ -1539,6 +1583,10 @@ def main():
             inverse_train_every=args.intrinsic_train_every,
             inverse_batch_size=args.intrinsic_batch_size,
             target_tau=args.intrinsic_target_tau,
+            cluster_distance=args.intrinsic_cluster_distance,
+            kernel_epsilon=args.intrinsic_kernel_epsilon,
+            pseudo_count=args.intrinsic_pseudocount,
+            max_similarity=args.intrinsic_max_similarity,
             device=args.device,
         )
         env = intrinsic_env
